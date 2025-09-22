@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Scan photo — Déverrouillage (Jeu)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; display:flex; flex-direction:column; align-items:center; padding:20px; }
+    #video { width:360px; height:480px; background:#000; border:1px solid #333; }
+    #refImg { max-width:220px; margin-top:12px; border:1px solid #ccc; }
+    #status { margin-top:12px; font-weight:600; color:#222;}
+    #controls { margin-top:10px; }
+    button { padding:8px 12px; font-size:16px; margin-right:8px; }
+    footer { margin-top:18px; font-size:13px; color:#555; max-width:720px; text-align:center; }
+  </style>
+</head>
+<body>
+  <h2>Scanner la photo (Face-ID simulé)</h2>
+
+  <video id="video" autoplay muted></video>
+  <div id="controls">
+    <button id="startBtn">Démarrer la caméra</button>
+    <button id="scanBtn" disabled>Scanner maintenant</button>
+    <button id="stopBtn" disabled>Arrêter</button>
+  </div>
+
+  <img id="refImg" src="images/camille.png" alt="Photo de référence (placez-la devant l'objectif)" />
+  <div id="status">Statut : prêt. Chargez la caméra et placez la photo devant l'objectif.</div>
+
+  <!-- face-api CDN (vladmandic builds) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.min.js"></script>
+
+  <script>
+    const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+    const video = document.getElementById('video');
+    const startBtn = document.getElementById('startBtn');
+    const scanBtn = document.getElementById('scanBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statusEl = document.getElementById('status');
+    const refImgEl = document.getElementById('refImg');
+
+    let referenceDescriptor = null;
+    let stream = null;
+    const THRESHOLD = 0.6; // ajustable (plus bas = plus strict)
+
+    async function loadModels() {
+      statusEl.textContent = 'Chargement des modèles...';
+      await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+      statusEl.textContent = 'Modèles chargés.';
+    }
+
+    async function computeReferenceDescriptor() {
+      statusEl.textContent = 'Traitement de la photo de référence...';
+      await refImgEl.decode();
+      const detections = await faceapi.detectSingleFace(refImgEl).withFaceLandmarks().withFaceDescriptor();
+      if (!detections) {
+        statusEl.textContent = 'Aucun visage détecté sur la photo de référence. Recadre la photo sur le visage.';
+        throw new Error('No face in reference image');
+      }
+      referenceDescriptor = detections.descriptor;
+      statusEl.textContent = 'Photo de référence prête. Démarre la caméra.';
+      scanBtn.disabled = false;
+    }
+
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        video.srcObject = stream;
+        await video.play();
+        statusEl.textContent = 'Caméra activée. Place la photo devant l\'objectif puis clique "Scanner maintenant".';
+        scanBtn.disabled = false;
+        stopBtn.disabled = false;
+      } catch (err) {
+        statusEl.textContent = 'Erreur caméra : ' + (err.message || err);
+      }
+    }
+
+    async function captureFrameDescriptor() {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const detection = await faceapi.detectSingleFace(canvas).withFaceLandmarks().withFaceDescriptor();
+      return detection ? detection.descriptor : null;
+    }
+
+    function euclideanDistance(d1, d2) {
+      let sum = 0;
+      for (let i = 0; i < d1.length; i++) {
+        const diff = d1[i] - d2[i];
+        sum += diff * diff;
+      }
+      return Math.sqrt(sum);
+    }
+
+    async function scanAndCompare() {
+      statusEl.textContent = 'Scan en cours — place la photo devant l\'objectif...';
+      let bestDistance = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const desc = await captureFrameDescriptor();
+        if (desc) {
+          const dist = euclideanDistance(referenceDescriptor, desc);
+          if (dist < bestDistance) bestDistance = dist;
+        }
+        await new Promise(r => setTimeout(r, 350));
+      }
+
+      if (bestDistance === Infinity) {
+        statusEl.textContent = 'Aucun visage détecté. Ajuste la position / la luminosité et réessaie.';
+        return;
+      }
+
+      statusEl.textContent = 'Meilleure distance : ' + bestDistance.toFixed(3);
+      if (bestDistance <= THRESHOLD) {
+        statusEl.textContent = 'Déverrouillage réussi ! Redirection...';
+        if (stream) { stream.getTracks().forEach(t => t.stop()); }
+        setTimeout(() => { window.location.href = 'unlocked.html'; }, 900);
+      } else {
+        statusEl.textContent = 'Échec du scan (photo non reconnue). Essaie un meilleur alignement.';
+      }
+    }
+
+    function stopCamera() {
+      if (stream) { stream.getTracks().forEach(t => t.stop()); }
+      video.srcObject = null;
+      statusEl.textContent = 'Caméra arrêtée.';
+      stopBtn.disabled = true;
+    }
+
+    (async () => {
+      await loadModels();
+      refImgEl.addEventListener('load', async () => {
+        try { await computeReferenceDescriptor(); } catch(e) { console.error(e); }
+      });
+      if (refImgEl.complete) {
+        try { await computeReferenceDescriptor(); } catch(e) { console.error(e); }
+      }
+    })();
+
+    startBtn.addEventListener('click', startCamera);
+    scanBtn.addEventListener('click', scanAndCompare);
+    stopBtn.addEventListener('click', stopCamera);
+  </script># FaceID-Jeu — package prêt à héberger (GitHub Pages)
+
+Ce package contient une page web statique qui **simule** un déverrouillage par reconnaissance faciale (Face-ID) en comparant la photo de référence fournie avec un scan effectué par la caméra du navigateur.
+
+## Contenu du ZIP
+- `index.html` — page de scan (utilise `face-api` via CDN).
+- `unlocked.html` — page affichée après déverrouillage réussi.
+- `images/camille.png` — photo de référence (à placer devant la caméra pour déverrouiller).
+- `README.md` — ce fichier.
+
+## Déploiement (pas à pas) — sur GitHub Pages
+1. Crée un compte GitHub si tu n'en as pas.  
+2. Crée un nouveau repository (par ex. `faceid-game`).  
+3. Dans ton dépôt, clique sur **Add file → Upload files** et glisse le contenu du ZIP (ou téléverse l'archive et clique pour extraire).  
+4. Une fois les fichiers présents, va dans **Settings → Pages**.  
+   - Choisis la branche `main` (ou `master`) et le dossier `/ (root)` si demandé.  
+   - Clique sur **Save**. Quelques minutes plus tard ton site sera disponible à :  
+     `https://<ton-identifiant>.github.io/<nom-de-repo>/`  
+   - Accède à `https://<ton-identifiant>.github.io/<nom-de-repo>/index.html`
+
+> Note : GitHub Pages sert via HTTPS — nécessaire pour activer la caméra dans la plupart des navigateurs.
+
+## Tester localement (optionnel)
+Pour tester sur ta machine sans GitHub Pages, il te faut servir les fichiers via HTTP (la caméra et face-api exigent un contexte sécurisé ou HTTP sur localhost) :
+```bash
+cd faceid_game
+python3 -m http.server 8000
+# puis ouvrir http://localhost:8000/index.html
+```
+
+## Ajustements et conseils
+- **Seuil (`THRESHOLD`)** : par défaut `0.6`. Pour photos imprimées il faut souvent être plus permissif (→ `0.6–0.7`). Pour de la vraie biométrie tu baisserais le seuil (plus strict). Teste et ajuste.  
+- **Photo de référence** : si le script n'arrive pas à détecter un visage, recadre l'image sur le visage, augmente la résolution, et évite ombres/filtres.  
+- **Permissions caméra** : autorise l'accès à la caméra (popup du navigateur). Si la page est servie via `file://`, la caméra sera bloquée — utilise GitHub Pages ou `http.server`.  
+- **Google Sites** : héberge sur GitHub Pages et intègre la page dans Google Sites via un <iframe> (ou lien direct).
+
+## Sécurité & confidentialité
+Tout le traitement est effectué localement dans le navigateur : aucune image n'est envoyée à un serveur par le code fourni. Toutefois, les modèles `face-api` sont chargés depuis un CDN.
+
+## Problèmes fréquents et solutions rapides
+- *La caméra ne démarre pas* → vérifier HTTPS / localhost et permissions.  
+- *Aucun visage détecté* → recadrer la photo / augmenter luminosité / rapprocher la photo de la caméra.  
+- *Détection trop stricte* → augmenter la valeur THRESHOLD dans `index.html`.
+
+</body><!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Contenu déverrouillé</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; padding:32px; max-width:900px; margin:auto; }
+    h1 { color:#2a7ae2; }
+    .card { border:1px solid #ddd; padding:16px; border-radius:6px; background:#fff; box-shadow:0 2px 6px rgba(0,0,0,0.05); }
+    pre { background:#f7f7f7; padding:12px; }
+  </style>
+</head>
+<body>
+  <h1>Accès autorisé — Pièces déverrouillées</h1>
+  <div class="card">
+    <p>Vous avez déverrouillé le téléphone de la victime. Contenu simulé (exemples) :</p>
+    <ul>
+      <li><strong>Message vocal 1</strong> : « Excuse-moi ma chérie, pardonne-moi, laisse-moi t'expliquer. »</li>
+      <li><strong>Message du laboratoire</strong> : « Vos résultats sont arrivés, merci de passer les récupérer. »</li>
+      <li><strong>Message amie</strong> : « Je commence à m'inquiéter, tu ne réponds plus… »</li>
+    </ul>
+    <p>Note : dans le jeu, la fiche médicale (grossesse) peut être fournie séparément pour maintenir le suspense.</p>
+    <hr/>
+    <p>Retourner à la page de scan : <a href="index.html">Scanner une autre photo</a></p>
+  </div>
+</body>
+</html>
+
+</html>
